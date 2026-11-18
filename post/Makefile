@@ -4,6 +4,8 @@ OBJS = train.o words.o tags.o hmm.o
 
 ifeq ($(shell uname -s),Darwin)
 include ../MacOSX.config
+# post.o is built with `ld -r`, which can't read LTO bitcode
+override LTO=
 endif
 
 # compilation flags:
