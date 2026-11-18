@@ -1,6 +1,7 @@
 #include	<stdio.h>
 #include	<stdlib.h>
 #include	<string.h>
+#include	<math.h>
 
 #include	"dag.h"
 #include	"chart.h"
@@ -44,12 +45,141 @@ struct __attribute__((packed)) maxent_rule_key
 	fprintf(stderr, "MAXENT: %d visits / %d lookups / %d requests = %.1f per request ; %.1f%% hit rate\n", nmaxent_visits, nmaxent_lookups, nmaxent_requests, (float)nmaxent_visits / nmaxent_requests, 100*(float)nmaxent_visits / nmaxent_lookups);
 }*/
 
+
+/* Compact frozen form of the model.
+ *
+ * The original frozen form keeps both tables as chained hashes: a 24-byte
+ * bucket per feature, a separately allocated float, and (for the string
+ * table) a separately stored key string.  The compact form keeps the same
+ * features in open-addressed arrays with the score stored inline.
+ *
+ * String keys are stored as their ':'-separated pieces, each piece mapped to
+ * a 16-bit symbol id.  Joining with ':' is reversible by splitting on ':', so
+ * two key strings are equal exactly when their piece lists are equal; that
+ * makes a piece-list lookup give exactly the same answer as the original
+ * strcmp() lookup.  Lookups whose key string would be truncated by the
+ * original 512-byte buffer take the original string-building path, so they
+ * see the same truncated keys as before.
+ *
+ * Duplicate features keep whichever score the original hash_find() returned.
+ */
+
+#define	MKEY_PIECES		8
+#define	MKEY_NONE		0xFFFF	// unused piece slot
+#define	MKEY_UNKNOWN	0xFFFE	// piece not in the model; can never match
+
+struct maxent_compact_ro
+{
+	struct maxent_rule_key	key;
+	float					score;
+};
+
+struct maxent_compact_str
+{
+	unsigned short	piece[MKEY_PIECES];
+	float			score;
+};
+
+struct maxent_compact
+{
+	unsigned int				nro, ro_mask;	// *_mask fields hold table sizes
+	struct maxent_compact_ro	*ro;
+	unsigned int				nstr, str_mask;
+	struct maxent_compact_str	*str;
+	unsigned int				nsym, sym_mask;
+	unsigned int				*sym_slot;	// symbol id + 1, or 0 if empty
+	unsigned int				*sym_off;	// offset of each symbol in sym_pool
+	char						*sym_pool;
+};
+
+static struct maxent_compact	*compact;
+
+static inline unsigned int	mc_hash_bytes(const void *p, int len)
+{
+	const unsigned char	*b = p;
+	unsigned int	h = 2166136261u;
+	int i;
+	for(i=0;i<len;i++) { h ^= b[i]; h *= 16777619u; }
+	return h;
+}
+
+static inline unsigned int	mc_slot(unsigned int h, unsigned int size)
+{
+	return (unsigned int)(((unsigned long long)h * size) >> 32);
+}
+
+static inline unsigned short	mc_symbol(const char *str, int len)
+{
+	unsigned int	i = mc_slot(mc_hash_bytes(str, len), compact->sym_mask);
+	while(compact->sym_slot[i])
+	{
+		unsigned int	id = compact->sym_slot[i] - 1;
+		char	*sym = compact->sym_pool + compact->sym_off[id];
+		if(!strncmp(sym, str, len) && sym[len]==0)return id;
+		i = (i+1 == compact->sym_mask) ? 0 : i+1;
+	}
+	return MKEY_UNKNOWN;
+}
+
+// split 'str' on ':' and append the pieces' symbol ids; returns the new count
+// (which may exceed MKEY_PIECES, meaning no stored key can match)
+static inline int	mc_pieces(const char *str, unsigned short *out, int n)
+{
+	for(;;)
+	{
+		const char	*e = strchr(str, ':');
+		int	len = e ? (int)(e-str) : (int)strlen(str);
+		if(n < MKEY_PIECES)out[n] = mc_symbol(str, len);
+		n++;
+		if(!e)return n;
+		str = e+1;
+	}
+}
+
+static inline float	*mc_find_str(unsigned short *pieces, int n)
+{
+	if(n > MKEY_PIECES)return NULL;
+	unsigned short	key[MKEY_PIECES];
+	int k;
+	for(k=0;k<n;k++)
+	{
+		if(pieces[k]==MKEY_UNKNOWN)return NULL;
+		key[k] = pieces[k];
+	}
+	for(;k<MKEY_PIECES;k++)key[k] = MKEY_NONE;
+	unsigned int	i = mc_slot(mc_hash_bytes(key, sizeof(key)), compact->str_mask);
+	while(compact->str[i].piece[0] != MKEY_NONE)
+	{
+		if(!memcmp(compact->str[i].piece, key, sizeof(key)))return &compact->str[i].score;
+		i = (i+1 == compact->str_mask) ? 0 : i+1;
+	}
+	return NULL;
+}
+
+static inline float	*mc_find_str_string(const char *key)
+{
+	unsigned short	pieces[MKEY_PIECES];
+	int	n = mc_pieces(key, pieces, 0);
+	return mc_find_str(pieces, n);
+}
+
+static inline float	*mc_find_ro(struct maxent_rule_key *key)
+{
+	unsigned int	i = mc_slot(mc_hash_bytes(key, sizeof(*key)), compact->ro_mask);
+	while(compact->ro[i].key.lhs != -32768)
+	{
+		if(!memcmp(&compact->ro[i].key, key, sizeof(*key)))return &compact->ro[i].score;
+		i = (i+1 == compact->ro_mask) ? 0 : i+1;
+	}
+	return NULL;
+}
+
 float	maxent_score_ro(int lhs, int rhs1, int rhs2, struct scoring_ancestry	*anc)
 {
 	struct maxent_rule_key key;
 	int i;
 	float	score = 0;
-	if(!mem_ro)return 0;
+	if(!mem_ro && !compact)return 0;
 	//printf("score_ro: mem_ro entries = %d\n", mem_ro->entries);
 	//printf(" lhs %d = %s, rhs1 %d = %s, rhs2 %d, anc.rooted %d, anc.nparent_types %d [%s = %d]\n",
 		//lhs, rules[lhs]->name, rhs1, rules[rhs1]->name, rhs2, anc->rooted, anc->nparent_types, anc->parent_types[0], lookup_rule(anc->parent_types[0])->rnum);
@@ -66,13 +196,13 @@ float	maxent_score_ro(int lhs, int rhs1, int rhs2, struct scoring_ancestry	*anc)
 			//key.gp[i-1] = r->rnum;
 			key.gp[i-1] = anc->gprnum[i-1];
 		}
-		float *v = hash_find(mem_ro, (void*)&key);
+		float *v = compact ? mc_find_ro(&key) : hash_find(mem_ro, (void*)&key);
 		if(v)score += *v;
 	}
 	if(anc->rooted && anc->nparent_types < MAX_GRANDPARENTING)
 	{
 		key.gp[anc->nparent_types] = -2;
-		float *v = hash_find(mem_ro, (void*)&key);
+		float *v = compact ? mc_find_ro(&key) : hash_find(mem_ro, (void*)&key);
 		if(v)score += *v;
 	}
 	return score;
@@ -90,7 +220,36 @@ float	maxent_score(char *lhs, char *rhs1, char *rhs2, int rtl_unused, struct sco
 	//nmaxent_requests++;
 
 	//return (double)rand()/RAND_MAX - 0.5;
-	if(!mem)return 0;
+	if(!mem && !compact)return 0;
+
+	if(compact)
+	{
+		int	ngpf;
+		// the full key string at the deepest level, as the original code would build it
+		int	i, full = strlen(lhs) + 1 + (rhs1?strlen(rhs1):0) + 1 + (rhs2?strlen(rhs2):0);
+		for(i=0;i<anc->nparent_types;i++)full += 1 + strlen(rules[anc->gprnum[i]]->name);
+		if(anc->rooted)full += 2;
+		if(full <= 510)
+		{
+			unsigned short	pieces[MKEY_PIECES];
+			int	n = mc_pieces(lhs, pieces, 0);
+			n = mc_pieces(rhs1?:"", pieces, n);
+			n = mc_pieces(rhs2?:"", pieces, n);
+			for(ngpf=0;ngpf<=anc->nparent_types;ngpf++)
+			{
+				if(ngpf) n = mc_pieces(rules[anc->gprnum[ngpf-1]]->name, pieces, n);
+				float	*v = mc_find_str(pieces, n);
+				if(v)ret += *v;
+			}
+			if(anc->rooted)
+			{
+				n = mc_pieces("^", pieces, n);
+				float	*v = mc_find_str(pieces, n);
+				if(v)ret += *v;
+			}
+			return ret;
+		}
+	}
 
 	int	ngp;
 	char	*hkp = hkey;
@@ -100,16 +259,16 @@ float	maxent_score(char *lhs, char *rhs1, char *rhs2, int rtl_unused, struct sco
 		//if(ngp) hkp += safe_snprintf(hkp, 511 - (hkp-hkey), ":%s", anc->parent_types[ngp-1]);
 		if(ngp) hkp += safe_snprintf(hkp, 511 - (hkp-hkey), ":%s", rules[anc->gprnum[ngp-1]]->name);
 		MAXENT_NOISE("scoring key = %s\n", hkey);
-		struct maxent_feature	*feat = hash_find(mem, hkey);
-		if(feat)ret += feat->score;
+		float	*v = compact ? mc_find_str_string(hkey) : (float*)hash_find(mem, hkey);
+		if(v)ret += *v;
 		//nmaxent_lookups++;
 	}
 	if(anc->rooted)
 	{
 		hkp += safe_snprintf(hkp, 511 - (hkp-hkey), ":^");
 		MAXENT_NOISE("scoring key = %s\n", hkey);
-		struct maxent_feature	*feat = hash_find(mem, hkey);
-		if(feat)ret += feat->score;
+		float	*v = compact ? mc_find_str_string(hkey) : (float*)hash_find(mem, hkey);
+		if(v)ret += *v;
 		//nmaxent_lookups++;
 	}
 	MAXENT_NOISE(" ... %f\n", ret);
@@ -229,6 +388,7 @@ int load_mem(char *fname)
 
 	/*if(mem)
 		fprintf(stderr, "NOTE: overwriting pre-existing max-ent model with `%s'\n", fname);*/
+	compact = NULL;	// a model loaded at run time replaces the frozen one
 	mem = hash_new("maxent model");
 	mem_ro = hash_new("maxent model (rule-only)");
 	mem_ro->has_flk = sizeof(struct maxent_rule_key);
@@ -293,7 +453,131 @@ int load_mem(char *fname)
 struct stochastic_model
 {
 	struct hash	*mem, *mem_ro;
+	struct maxent_compact	*compact;
 };
+
+static unsigned int	mc_table_size(unsigned int n)
+{
+	// at most 70% full
+	return (unsigned int)(((unsigned long long)n * 10) / 7) + 16;
+}
+
+// build state (malloc'd while freezing, then copied into the image)
+static char		*mcb_pool;
+static int		mcb_pool_len, mcb_pool_cap;
+static unsigned int	*mcb_sym_slot, *mcb_sym_off, mcb_nsym, mcb_sym_cap, mcb_sym_mask;
+
+static int	mcb_symbol(const char *str, int len)
+{
+	unsigned int	i = mc_slot(mc_hash_bytes(str, len), mcb_sym_mask);
+	while(mcb_sym_slot[i])
+	{
+		unsigned int	id = mcb_sym_slot[i] - 1;
+		char	*sym = mcb_pool + mcb_sym_off[id];
+		if(!strncmp(sym, str, len) && sym[len]==0)return id;
+		i = (i+1 == mcb_sym_mask) ? 0 : i+1;
+	}
+	if(mcb_nsym >= MKEY_UNKNOWN || mcb_nsym >= mcb_sym_cap)return -1;
+	if(mcb_pool_len + len + 1 > mcb_pool_cap)
+	{
+		mcb_pool_cap = (mcb_pool_cap + len + 1) * 2;
+		mcb_pool = realloc(mcb_pool, mcb_pool_cap);
+	}
+	memcpy(mcb_pool + mcb_pool_len, str, len);
+	mcb_pool[mcb_pool_len + len] = 0;
+	mcb_sym_off[mcb_nsym] = mcb_pool_len;
+	mcb_pool_len += len + 1;
+	mcb_sym_slot[i] = ++mcb_nsym;
+	return mcb_nsym - 1;
+}
+
+// returns NULL if the model doesn't fit the compact form; caller keeps the original form
+static struct maxent_compact	*build_compact_model()
+{
+	int	i;
+	struct hash_bucket	*walk;
+
+	mcb_sym_cap = 65000;
+	mcb_sym_mask = mc_table_size(mcb_sym_cap);
+	mcb_sym_slot = calloc(mcb_sym_mask, sizeof(unsigned int));
+	mcb_sym_off = calloc(mcb_sym_cap, sizeof(unsigned int));
+	mcb_nsym = 0; mcb_pool = NULL; mcb_pool_len = mcb_pool_cap = 0;
+
+	unsigned int	str_size = mc_table_size(mem->entries), str_mask = str_size, nstr = 0;
+	struct maxent_compact_str	*str = malloc(sizeof(*str) * str_size);
+	for(i=0;i<str_size;i++)str[i].piece[0] = MKEY_NONE;
+
+	for(i=0;i<mem->size;i++)
+		for(walk=mem->buckets[i];walk;walk=walk->next)
+		{
+			// the score a lookup of this key returns today (first match in its chain)
+			struct maxent_feature	*winner = hash_find(mem, walk->key);
+			unsigned short	key[MKEY_PIECES];
+			int	n = 0, k;
+			char	*p = walk->key;
+			if(strlen(p) > 510) goto fail;	// lookups are truncated to 510 chars
+			for(;;)
+			{
+				char	*e = strchr(p, ':');
+				int	len = e ? (int)(e-p) : (int)strlen(p);
+				if(n >= MKEY_PIECES) goto fail;
+				int	id = mcb_symbol(p, len);
+				if(id < 0) goto fail;
+				key[n++] = id;
+				if(!e)break;
+				p = e+1;
+			}
+			for(k=n;k<MKEY_PIECES;k++)key[k] = MKEY_NONE;
+			unsigned int	h = mc_slot(mc_hash_bytes(key, sizeof(key)), str_size);
+			while(str[h].piece[0] != MKEY_NONE && memcmp(str[h].piece, key, sizeof(key)))h = (h+1 == str_size) ? 0 : h+1;
+			if(str[h].piece[0] == MKEY_NONE)
+			{
+				memcpy(str[h].piece, key, sizeof(key));
+				str[h].score = winner->score;
+				nstr++;
+			}
+			else assert(str[h].score == winner->score || isnan(winner->score));
+		}
+
+	unsigned int	ro_size = mc_table_size(mem_ro->entries), ro_mask = ro_size, nro = 0;
+	struct maxent_compact_ro	*ro = malloc(sizeof(*ro) * ro_size);
+	for(i=0;i<ro_size;i++)ro[i].key.lhs = -32768;
+	for(i=0;i<mem_ro->size;i++)
+		for(walk=mem_ro->buckets[i];walk;walk=walk->next)
+		{
+			float	*winner = hash_find(mem_ro, walk->key);
+			struct maxent_rule_key	*key = (struct maxent_rule_key*)walk->key;
+			if(key->lhs == -32768) goto fail;
+			unsigned int	h = mc_slot(mc_hash_bytes(key, sizeof(*key)), ro_size);
+			while(ro[h].key.lhs != -32768 && memcmp(&ro[h].key, key, sizeof(*key)))h = (h+1 == ro_size) ? 0 : h+1;
+			if(ro[h].key.lhs == -32768)
+			{
+				ro[h].key = *key;
+				ro[h].score = *winner;
+				nro++;
+			}
+		}
+
+	// copy into the image
+	struct maxent_compact	*mc = slab_alloc(sizeof(*mc));
+	mc->nstr = nstr; mc->str_mask = str_mask;
+	mc->str = slab_alloc(sizeof(*str) * str_size); memcpy(mc->str, str, sizeof(*str) * str_size);
+	mc->nro = nro; mc->ro_mask = ro_mask;
+	mc->ro = slab_alloc(sizeof(*ro) * ro_size); memcpy(mc->ro, ro, sizeof(*ro) * ro_size);
+	mc->nsym = mcb_nsym; mc->sym_mask = mcb_sym_mask;
+	mc->sym_slot = slab_alloc(sizeof(unsigned int) * mcb_sym_mask); memcpy(mc->sym_slot, mcb_sym_slot, sizeof(unsigned int) * mcb_sym_mask);
+	mc->sym_off = slab_alloc(sizeof(unsigned int) * (mcb_nsym?mcb_nsym:1)); memcpy(mc->sym_off, mcb_sym_off, sizeof(unsigned int) * mcb_nsym);
+	int	pool_len4 = (mcb_pool_len + 3) & ~3;
+	mc->sym_pool = slab_alloc(pool_len4 ? pool_len4 : 4); memcpy(mc->sym_pool, mcb_pool, mcb_pool_len);
+	fprintf(stderr, "NOTE: compact max-ent model: %u string features, %u rule features, %u symbols\n", nstr, nro, mcb_nsym);
+	free(str); free(ro); free(mcb_sym_slot); free(mcb_sym_off); free(mcb_pool);
+	return mc;
+
+fail:
+	fprintf(stderr, "NOTE: max-ent model doesn't fit the compact form; keeping the original form\n");
+	free(str); free(mcb_sym_slot); free(mcb_sym_off); free(mcb_pool);
+	return NULL;
+}
 
 void	*freeze_stochastic_model()
 {
@@ -304,6 +588,16 @@ void	*freeze_stochastic_model()
 		struct stochastic_model *mod = slab_alloc(sizeof(*mod));
 		mod->mem = NULL;
 		mod->mem_ro = NULL;
+		mod->compact = NULL;
+		return mod;
+	}
+	struct maxent_compact	*mc = getenv("ACE_ORIGINAL_MAXENT") ? NULL : build_compact_model();
+	if(mc)
+	{
+		struct stochastic_model *mod = slab_alloc(sizeof(*mod));
+		mod->mem = NULL;
+		mod->mem_ro = NULL;
+		mod->compact = mc;
 		return mod;
 	}
 	for(i=0;i<mem->size;i++)
@@ -325,6 +619,7 @@ void	*freeze_stochastic_model()
 	struct stochastic_model *mod = slab_alloc(sizeof(*mod));
 	mod->mem = freeze_hash(mem);
 	mod->mem_ro = freeze_hash(mem_ro);
+	mod->compact = NULL;
 	return mod;
 }
 
@@ -332,11 +627,12 @@ void	recover_stochastic_model(void *_frozen)
 {
 	extern int debug_level;
 	struct stochastic_model *mod = _frozen;
-	if(!mod) { mem = NULL; mem_ro = NULL; }
+	if(!mod) { mem = NULL; mem_ro = NULL; compact = NULL; }
 	else
 	{
 		mem = mod->mem;
 		mem_ro = mod->mem_ro;
+		compact = mod->compact;
 	}
 	if(mem && debug_level)printf("NOTE: max-ent model hash contains %d entries in %d slots\n", mem->entries, mem->size);
 }
