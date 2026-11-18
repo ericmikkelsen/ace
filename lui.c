@@ -138,7 +138,7 @@ lui_process_request(char	*line)
 		else if(!strcmp(command, "skeleton"))
 			lui_type_skeleton(type);
 		else if(!strcmp(command, "expansion"))
-			lui_type(type, 0);
+			lui_type(type);
 		else if(!strcmp(command, "hierarchy"))
 			lui_hierarchy(type);
 		else if(!strcmp(command, "source"))
@@ -780,7 +780,7 @@ void	output_lui_edge_tree(struct edge	*e)
 
 void	output_lui_edge_entity(struct edge	*e)
 {
-	if(e->rule)lui_rule(e->rule->name, 0);
+	if(e->rule)lui_rule(e->rule->name);
 	else if(e->lex)lui_lex(e->lex->word);
 }
 

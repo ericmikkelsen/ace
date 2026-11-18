@@ -442,7 +442,7 @@ void	treebank_control()
 		printf("trying sentence:  "); print_string(S); printf("\n");
 		printf("correct tree:\n"); print_tree(T, 0);
 		oracle_trace = sr;
-		parse(S->nwords, S->words, S->words, "(not supported)");
+		parse(S->nwords, S->words, NULL, NULL, "(not supported)");
 	}
 	return;
 

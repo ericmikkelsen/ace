@@ -373,13 +373,13 @@ handle_lui_colon_command(char	*line)
 	int	l = strlen(line);
 	if(l>3 && line[l-1]=='\n')line[l-1] = 0;
 	if(line[1]=='r' && line[2]==' ')
-		lui_rule(line+3, 1);
+		lui_rule(line+3);
 	if(line[1]=='l' && line[2]==' ')
-		lui_lex(line+3, 1);
+		lui_lex(line+3);
 	if(line[1]=='i' && line[2]==' ')
 		lui_instance(line+3, 1);
 	if(line[1]=='t' && line[2]==' ')
-		lui_type(line+3, 1);
+		lui_type(line+3);
 	if(line[1]=='h' && line[2]==' ')
 		show_hierarchy(line+3);
 	if(line[1]=='H' && line[2]==' ')
@@ -524,6 +524,10 @@ void	initialize_engine()
 			exit(-1);
 		}
 
+#ifdef	__EMSCRIPTEN__
+		// the image region has to be reserved before loading the grammar grows the heap
+		wasm_freezer_region((size_t)1024*1024*(getenv("ACE_WASM_FREEZER_MB") ? atoi(getenv("ACE_WASM_FREEZER_MB")) : 640));
+#endif
 		gettimeofday(&tv1, 0);
 		load_grammar(load_grammar_path);
 		gettimeofday(&tv2, 0);

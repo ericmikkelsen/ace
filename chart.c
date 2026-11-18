@@ -588,7 +588,7 @@ hyperfailure(struct edge	*e)
 	printf("parent dag:\n");print_dg(e->ha_par);printf("\n");
 	printf("argument dag:\n");print_dg(e->ha_dg);printf("\n");
 	unify_backtrace();
-	print_current_sentence();
+	print_current_sentence(0);
 	exit(-1);
 }
 
