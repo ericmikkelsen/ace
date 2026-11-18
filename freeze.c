@@ -157,11 +157,13 @@ struct lexeme	*freeze_lexeme(struct lexeme	*lin)
 	lout->word = freeze_string(lin->word);
 
 	lout->stemlen = lin->stemlen;
-	lout->stem = slab_alloc(sizeof(struct type*) * lout->stemlen);
+	// simple-form lexemes with a CARG keep its type in one extra stem slot
+	int	nstem = lout->stemlen + ((lin->onset & 2) && !lin->dg ? 1 : 0);
+	lout->stem = slab_alloc(sizeof(struct type*) * nstem);
 	lout->lextype = FT(lin->lextype);
 	lout->pred = FT(lin->pred);
 	lout->onset = lin->onset;
-	memcpy(lout->stem, lin->stem, sizeof(struct type*) * lout->stemlen);
+	memcpy(lout->stem, lin->stem, sizeof(struct type*) * nstem);
 
 	lin->dg = (struct dg*)lout;	// NOTE: keep pointer to new copy of lexeme, so semantic index can be updated
 
@@ -346,7 +348,8 @@ extern struct type_hierarchy	*main_th, *semi_th, *semi_p_th;
 	for(i=0;i<nlexemes;i++)
 	{
 		if(lexemes[i]->dg)patch_dg(lexemes[i]->dg);
-		for(j=0;j<lexemes[i]->stemlen;j++)
+		int	nstem = lexemes[i]->stemlen + ((lexemes[i]->onset & 2) && !lexemes[i]->dg ? 1 : 0);
+		for(j=0;j<nstem;j++)
 			//lexemes[i]->stem[j] = strings[lexemes[i]->stem[j]->tnum];
 			lexemes[i]->stem[j] = FT(lexemes[i]->stem[j]);
 	}

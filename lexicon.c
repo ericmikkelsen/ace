@@ -232,7 +232,7 @@ void	dump_parts_of_speech()
 }
 
 static int	orthfeat = -1, rfeat = 2, ffeat = 1, synsemfeat = -1, lkeysfeat, keyrelfeat,
-			predfeat, phonfeat, onsetfeat, listfeat, __tlfeat;
+			predfeat, phonfeat, onsetfeat, listfeat, __tlfeat, cargfeat = -1;
 static struct type	*predsort, *con, *voc, *native_token_list;
 
 int	nsimpleform = 0;
@@ -251,6 +251,7 @@ void	init_fnums()
 	phonfeat = lookup_fname("PHON");
 	onsetfeat = lookup_fname("ONSET");
 	listfeat = lookup_fname("LIST");
+	cargfeat = lookup_fname("CARG");
 	predsort = lookup_type("predsort");
 	con = lookup_type("con");
 	voc = lookup_type("voc");
@@ -270,7 +271,9 @@ struct type *predict_onset(char *form)
 	else return con;
 }
 
-void	simplify_lexeme(struct lexeme	*l)
+static void	simplify_lexeme_extended(struct lexeme	*l);
+
+static void	simplify_lexeme_original(struct lexeme	*l)
 {
 	struct dg	*dg = l->dg, *ss, *lk, *kr, *pr, *ph, *on, *__tl;
 
@@ -329,6 +332,112 @@ void	simplify_lexeme(struct lexeme	*l)
 	l->dg = 0;
 }
 
+/* Simple-form flags, kept in the 'onset' field:
+ *   1: SYNSEM.PHON.ONSET is present (the original meaning of onset = 1)
+ *   2: SYNSEM.LKEYS.KEYREL.CARG is present; its value is stored in stem[stemlen]
+ *   4: SYNSEM.LKEYS.KEYREL.PRED is absent
+ * Lexemes simplified by the original rule only ever use flag 1.
+ */
+#define	SIMPLE_ONSET	1
+#define	SIMPLE_CARG		2
+#define	SIMPLE_NO_PRED	4
+
+int	nsimpleform_extended = 0;
+
+void	simplify_lexeme(struct lexeme	*l)
+{
+	simplify_lexeme_original(l);
+	if(l->dg)simplify_lexeme_extended(l);
+}
+
+/* The original rule covers single-word entries whose KEYREL has only PRED.
+ * This one also covers multi-word ORTH lists and KEYRELs with CARG (proper
+ * names, mostly).  An entry is only simplified if re-expanding it gives a
+ * structure equivalent to the original, so parsing is unaffected.
+ */
+static void	simplify_lexeme_extended(struct lexeme	*l)
+{
+	struct dg	*dg = l->dg, *ss, *lk, *kr, *pr = NULL, *carg = NULL, *ph, *on, *__tl;
+	int	flags = 0, i;
+
+	if(l->stemlen < 1 || l->stemlen > 16)return;
+	if(dg->narcs != 2)return;
+	if(dg->label[0] != orthfeat && dg->label[1] != orthfeat)return;
+	if(dg->label[0] != synsemfeat && dg->label[1] != synsemfeat)return;
+
+	ss = dg_hop(dg, synsemfeat);
+	if(ss->narcs == 2)
+	{
+		if(ss->label[0] != lkeysfeat && ss->label[1] != lkeysfeat)return;
+		if(ss->label[0] != phonfeat && ss->label[1] != phonfeat)return;
+	}
+	else if(ss->narcs==1)
+	{
+		if(ss->label[0] != lkeysfeat)return;
+	}
+	else return;
+
+	lk = dg_hop(ss, lkeysfeat);
+	if(lk->narcs != 1 || lk->label[0] != keyrelfeat)return;
+	kr = dg_hop(lk, keyrelfeat);
+	if(kr->narcs < 1 || kr->narcs > 2)return;
+	for(i=0;i<kr->narcs;i++)
+		if(kr->label[i] != predfeat && kr->label[i] != cargfeat)return;
+	pr = dg_hop(kr, predfeat);
+	if(pr)
+	{
+		if(pr->narcs != 0 || pr->xtype != l->pred)return;
+	}
+	else flags |= SIMPLE_NO_PRED;
+	carg = (cargfeat>=0) ? dg_hop(kr, cargfeat) : NULL;
+	if(carg)
+	{
+		if(carg->narcs != 0)return;
+		flags |= SIMPLE_CARG;
+	}
+
+	ph = dg_hop(ss, phonfeat);
+	if(ph)
+	{
+		if(ph->narcs != 1 || ph->label[0] != onsetfeat)return;
+		on = dg_hop(ph, onsetfeat);
+		if(on->narcs != 1 || on->label[0] != __tlfeat)return;
+		__tl = dg_hop(on, __tlfeat);
+		if(__tl->xtype != native_token_list || __tl->narcs != 0)return;
+		if(on->xtype != predict_onset(l->stem[0]->name))return;
+		flags |= SIMPLE_ONSET;
+	}
+
+	// tentatively simplify, then check the expansion against the original
+	int	old_onset = l->onset;
+	struct type	**old_stem = l->stem;
+	l->onset = flags;
+	if(flags & SIMPLE_CARG)
+	{
+		l->stem = malloc(sizeof(struct type*) * (l->stemlen + 1));
+		memcpy(l->stem, old_stem, sizeof(struct type*) * l->stemlen);
+		l->stem[l->stemlen] = carg->xtype;
+	}
+	l->dg = NULL;
+	struct dg	*exp = expand_lexeme(l);
+	// lexical_dg() wellforms the lexeme after unifying it with its type, so
+	// information that wellforming would add anyway can't change the result;
+	// compare against the wellformed original.
+	struct dg	*wf = wellform_dg(copy_dg(dg));
+	if(!wf || equivalent_dg(exp, wf, 1, 1, 0) != 2)
+	{
+		// not exactly the same information; keep the full structure
+		if(l->stem != old_stem)free(l->stem);
+		l->stem = old_stem;
+		l->onset = old_onset;
+		l->dg = dg;
+		return;
+	}
+	if(l->stem != old_stem)free(old_stem);
+	nsimpleform++;
+	nsimpleform_extended++;
+}
+
 struct dg	*expand_lexeme(struct lexeme	*l)
 {
 	struct dg	*dg, *ss, *lk, *kr, *pr, *st, *f, *ph, *on, *__tl;
@@ -338,13 +447,23 @@ struct dg	*expand_lexeme(struct lexeme	*l)
 		assert(!"Found a simple-form lexeme, but that feature is not enabled!");
 	if(orthfeat==-1)init_fnums();
 
-	pr = atomic_dg(top_type);
-	pr->xtype = pr->type = l->pred;
-	kr = add_dg_hop(atomic_dg(top_type), predfeat, pr);
+	if(!(l->onset & SIMPLE_NO_PRED))
+	{
+		pr = atomic_dg(top_type);
+		pr->xtype = pr->type = l->pred;
+		kr = add_dg_hop(atomic_dg(top_type), predfeat, pr);
+	}
+	else kr = atomic_dg(top_type);
+	if(l->onset & SIMPLE_CARG)
+	{
+		struct dg	*c = atomic_dg(top_type);
+		c->xtype = c->type = l->stem[l->stemlen];
+		kr = add_dg_hop(kr, cargfeat, c);
+	}
 	lk = add_dg_hop(atomic_dg(top_type), keyrelfeat, kr);
 	ss = add_dg_hop(atomic_dg(top_type), lkeysfeat, lk);
 
-	if(l->onset)
+	if(l->onset & SIMPLE_ONSET)
 	{
 		__tl = atomic_dg("native_token_list");
 		on = atomic_dg(top_type);
@@ -354,10 +473,16 @@ struct dg	*expand_lexeme(struct lexeme	*l)
 		ss = add_dg_hop(ss, phonfeat, ph);
 	}
 
-	f = atomic_dg(top_type);
-	f->xtype = f->type = l->stem[0];
-	st = add_dg_hop(atomic_dg(top_type), ffeat, f);
-	st = add_dg_hop(st, rfeat, atomic_dg(g_null_type));
+	// ORTH < stem[0], ..., stem[stemlen-1] >, built from the end
+	st = atomic_dg(g_null_type);
+	int	si;
+	for(si=l->stemlen-1;si>=0;si--)
+	{
+		f = atomic_dg(top_type);
+		f->xtype = f->type = l->stem[si];
+		struct dg	*cell = add_dg_hop(atomic_dg(top_type), ffeat, f);
+		st = add_dg_hop(cell, rfeat, st);
+	}
 	dg = atomic_dg(top_type);
 	dg = add_dg_hop(dg, orthfeat, st);
 	dg = add_dg_hop(dg, synsemfeat, ss);
@@ -627,7 +752,7 @@ int	load_lexicon()
 	run_task("processing lexicon...", load_lexicon1);
 
 	show_task_name("simple lexemes");
-	printf("%d / %d = %.2f%%\n", nsimpleform, nlexemes, 100*(float)nsimpleform / nlexemes);
+	printf("%d / %d = %.2f%% (%d by the extended form)\n", nsimpleform, nlexemes, 100*(float)nsimpleform / nlexemes, nsimpleform_extended);
 	return 0;
 }
 
