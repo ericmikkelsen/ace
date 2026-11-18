@@ -8,6 +8,7 @@
 #include	<sys/mman.h>
 #include	"dag.h"
 #include	"conf.h"
+#include	"freeze.h"
 //#include	<asm/mman.h>
 
 void	subsume_backtrace();
@@ -64,8 +65,13 @@ void	commit_slab()
 	if(freeze_next)
 	{
 		printf("freezing %.1fM to file map %p\n", (float)slabu/1024/1024, freeze_point);
+#ifdef	__EMSCRIPTEN__
+		if(wasm_write_all(freeze_fd, freeze_point, slabu))exit(-1);
+		if(ftruncate(freeze_fd, slabu)) { perror("ftruncate to final length"); exit(-1); }
+#else
 		if(ftruncate(freeze_fd, slabu)) { perror("ftruncate to final length"); exit(-1); }
 		if(msync(freeze_point, slabu, MS_ASYNC)) { perror("msync"); exit(-1); }
+#endif
 		close(freeze_fd);
 		freeze_next = NULL;
 	}
@@ -99,8 +105,13 @@ void	clear_slab()
 		{
 			for(i=64;i<aoldslabs;i++)
 			{
-				//free(oldslabs[i]);
+#ifdef	__EMSCRIPTEN__
+				// emulated mmap hands out 64KB-aligned blocks that a freed slab can't
+				// be reused for, so the heap kept growing; plain malloc/free reuses them
+				free(oldslabs[i]);
+#else
 				munmap(oldslabs[i], SLAB_SIZE);
+#endif
 				oldslabs[i] = NULL;
 			}
 			aoldslabs = 64;
@@ -139,7 +150,12 @@ void	next_slab()
 			perror("mmap hugetlb failed");
 			ptr = mmap(NULL, SLAB_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 		}*/
+#ifdef	__EMSCRIPTEN__
+		void	*ptr = malloc(SLAB_SIZE);
+		if(!ptr) { fprintf(stderr, "out of memory allocating a slab\n"); exit(-1); }
+#else
 		void	*ptr = mmap(NULL, SLAB_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+#endif
 		oldslabs[aoldslabs-1] = ptr;
 	}
 	slab = oldslabs[noldslabs-1];

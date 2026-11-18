@@ -472,7 +472,12 @@ static int	load_freeze()
 		exit(-1);
 	}
 
+#ifdef	__EMSCRIPTEN__
+	G = wasm_freezer_region(loaded_freeze_size);
+	if(wasm_read_all(loaded_freeze_fd, G, loaded_freeze_size))exit(-1);
+#else
 	G = (struct grammar*)mmap((void*)FREEZER_MMAP_BASE, loaded_freeze_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, loaded_freeze_fd, 0);
+#endif
 	// first try to map with HUGETLB
 	//G = (struct grammar*)mmap((void*)FREEZER_MMAP_BASE, loaded_freeze_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_HUGETLB, loaded_freeze_fd, 0);
 	//fprintf(stderr, "result of mmap grammar with HUGETLB: %p\n", G);
@@ -581,7 +586,9 @@ void	reload_frozen_grammar()
 		exit(-1);
 	}
 	fprintf(stderr, "NOTE: generation reset\n");
+#ifndef	__EMSCRIPTEN__
 	munmap((void*)FREEZER_MMAP_BASE, loaded_freeze_size);
+#endif
 	null_generation();
 	load_freeze();
 }
@@ -614,6 +621,10 @@ int	setup_save_frozen_grammar(char	*path)
 
 	if(freeze_fd<0) { perror(path); exit(-1); }
 
+#ifdef	__EMSCRIPTEN__
+	freeze_point = wasm_freezer_region(FREEZER_MMAP_SIZE);
+	return 0;
+#endif
 	if(ftruncate(freeze_fd, FREEZER_MMAP_SIZE)) { perror("ftruncate FREEZER_MMAP_SIZE"); exit(-1); }
 	//freeze_point = mmap((void*)FREEZER_MMAP_BASE, FREEZER_MMAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, freeze_fd, 0);
 	freeze_point = mmap((void*)FREEZER_MMAP_BASE, FREEZER_MMAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, freeze_fd, 0);

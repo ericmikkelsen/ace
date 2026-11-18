@@ -80,8 +80,14 @@ int	compile_qc(char	*qccode_path)
 #else
 	sprintf(command, "gcc -O2 -x c -shared -fPIC -DPIC - -o '%s'", target_path);
 #endif
+#ifdef	__EMSCRIPTEN__
+	char	*qc_c_path = getenv("ACE_QC_C_OUT") ?: "qcex.c";
+	FILE	*gcc = fopen(qc_c_path, "w");
+	if(!gcc) { perror(qc_c_path); exit(-1); }
+#else
 	FILE	*gcc = popen(command, "w");
 	if(!gcc) { perror("popen"); exit(-1); }
+#endif
 
 	fprintf(gcc, "struct type; struct dg;\n");
 	fprintf(gcc, "struct dg *noninline_dg_hop(struct dg*, int);\n");
@@ -157,6 +163,16 @@ int	compile_qc(char	*qccode_path)
 
 	fprintf(gcc, "}\n");
 
+#ifdef	__EMSCRIPTEN__
+	fclose(gcc);
+	close(fd);
+	unlink(target_path);
+	fprintf(stderr, "NOTE: wrote quickcheck extractor C to %s\n", qc_c_path);
+	if(getenv("ACE_QC_C_ONLY"))exit(0);
+	qc_image_size = 0;
+	qc_image = NULL;
+	return 0;
+#endif
 	int res = pclose(gcc);
 	if(res != 0) { perror("gcc"); exit(-1); }
 
@@ -177,6 +193,10 @@ int	compile_qc(char	*qccode_path)
 
 qc_extractor_function	dynamically_link_qc_extractor()
 {
+#ifdef	__EMSCRIPTEN__
+	extern void	extractor(struct type **entries, struct dg *d);
+	return (qc_extractor_function)extractor;
+#endif
 	//char	path[128] = "/tmp/qcex.so-XXXXXX";
 	//int	fd = mkstemp(path);
 
