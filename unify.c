@@ -1,5 +1,6 @@
 // implementation of Tomabechi's SS Quasi-Destructive Unifier
 
+#include	<alloca.h>
 #include	<stdio.h>
 #include	<stdlib.h>
 #include	<string.h>
@@ -1278,7 +1279,11 @@ int	unify1(struct dg	*dg1, struct dg	*dg2)
 
 	// quasi-destructively unify the four sets of arcs together!
 
-	unsigned char	news[dg2->narcs], newcs[dg2->ncarcs];
+	// Small fixed buffers instead of variable-length arrays: some platforms
+	// (e.g. macOS) run a stack probe on every call that allocates a VLA.
+	unsigned char	news_buf[32], newcs_buf[32];
+	unsigned char	*news = (dg2->narcs <= 32) ? news_buf : alloca(dg2->narcs);
+	unsigned char	*newcs = (dg2->ncarcs <= 32) ? newcs_buf : alloca(dg2->ncarcs);
 	int	nn=0, nc=0;
 
 	arcs1 = DARCS(dg1);
