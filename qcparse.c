@@ -47,6 +47,63 @@ void	mark_dg_nodes(struct dg	*d)
 	for(i=0;i<d->narcs;i++)mark_dg_nodes(a[i]);
 }
 
+static void	record_mark(int *naddrs, struct qcaddr **addrs, int mark, int d, int s)
+{
+	assert(mark > 0 && mark < marker);
+	naddrs[mark]++;
+	addrs[mark] = realloc(addrs[mark], sizeof(struct qcaddr)*naddrs[mark]);
+	addrs[mark][naddrs[mark]-1].dtr = d;
+	addrs[mark][naddrs[mark]-1].slot = s;
+}
+
+static struct qcformula	*extract_formula(int *naddrs, struct qcaddr **addrs, struct qc	*q, struct qc	*qbase, int	except)
+{
+	int k, l;
+	struct qcformula	*F = calloc(sizeof(struct qcformula), qc_size);
+	for(k=0;k<qc_size;k++)
+	{
+		struct type	*T = qc_type_n(q, k);
+		if(!T)
+		{
+			// this slot is *missing*; if there is a slot [z] whose paths *contain* [k]
+			// and whose values are copied from [z] in another portion of the rule,
+			// then [k] can be inferred to be copied too.
+			int z;
+			for(z=k-1;z>=0;z--)
+				if(qc_contains(z, k))
+				{
+					T = qc_type_n(q, z);
+					if(!T)continue;
+					int	mark = (int)(long)T;
+					for(l=0;l<naddrs[mark];l++)
+						if(addrs[mark][l].dtr != except && addrs[mark][l].dtr != -1 && addrs[mark][l].slot == z)
+						{
+							// all of [z] is copied from this daughter;
+							// copy [k] from slot [k] on this daughter
+							F[k].base = lookup_type(top_type);
+							F[k].addrs = malloc(sizeof(struct qcaddr));
+							F[k].addrs[0].dtr = addrs[mark][l].dtr;
+							F[k].addrs[0].slot = k;
+							F[k].naddrs = 1;
+							break;
+						}
+					if(l<naddrs[mark])break;
+				}
+		}
+		else
+		{
+			int	mark = (int)(long)T;
+			assert(mark > 0 && mark < marker);
+			F[k].base = qc_type_n(qbase, k);
+			F[k].addrs = malloc(sizeof(struct qcaddr)*naddrs[mark]);
+			for(l=0;l<naddrs[mark];l++)
+				if(addrs[mark][l].dtr != except && addrs[mark][l].dtr != -1)
+					F[k].addrs[F[k].naddrs++] = addrs[mark][l];
+		}
+	}
+	return F;
+}
+
 struct qcrule	*prepare_qc_rule(struct rule	*R)
 {
 	struct qcrule	*r = calloc(sizeof(*r),1);
@@ -64,21 +121,13 @@ struct qcrule	*prepare_qc_rule(struct rule	*R)
 
 	int				*naddrs = calloc(sizeof(int), marker);
 	struct qcaddr	**addrs = calloc(sizeof(struct qcaddr*), marker);
-	void record_mark(int mark, int d, int s)
-	{
-		assert(mark > 0 && mark < marker);
-		naddrs[mark]++;
-		addrs[mark] = realloc(addrs[mark], sizeof(struct qcaddr)*naddrs[mark]);
-		addrs[mark][naddrs[mark]-1].dtr = d;
-		addrs[mark][naddrs[mark]-1].slot = s;
-	}
 	for(i=0;i<qc_size;i++)
 	{
 		struct type	*T = qc_type_n(mqc, i);
 		if(T)
 		{
 			int	mark = (int)(long)T;
-			record_mark(mark, -1, i);
+			record_mark(naddrs, addrs, mark, -1, i);
 		}
 		for(j=0;j<R->ndaughters;j++)
 		{
@@ -86,63 +135,15 @@ struct qcrule	*prepare_qc_rule(struct rule	*R)
 			if(T)
 			{
 				int mark = (int)(long)T;
-				record_mark(mark, j, i);
+				record_mark(naddrs, addrs, mark, j, i);
 			}
 		}
 	}
 
-	struct qcformula	*extract_formula(struct qc	*q, struct qc	*qbase, int	except)
-	{
-		int k, l;
-		struct qcformula	*F = calloc(sizeof(struct qcformula), qc_size);
-		for(k=0;k<qc_size;k++)
-		{
-			struct type	*T = qc_type_n(q, k);
-			if(!T)
-			{
-				// this slot is *missing*; if there is a slot [z] whose paths *contain* [k]
-				// and whose values are copied from [z] in another portion of the rule,
-				// then [k] can be inferred to be copied too.
-				int z;
-				for(z=k-1;z>=0;z--)
-					if(qc_contains(z, k))
-					{
-						T = qc_type_n(q, z);
-						if(!T)continue;
-						int	mark = (int)(long)T;
-						for(l=0;l<naddrs[mark];l++)
-							if(addrs[mark][l].dtr != except && addrs[mark][l].dtr != -1 && addrs[mark][l].slot == z)
-							{
-								// all of [z] is copied from this daughter;
-								// copy [k] from slot [k] on this daughter
-								F[k].base = lookup_type(top_type);
-								F[k].addrs = malloc(sizeof(struct qcaddr));
-								F[k].addrs[0].dtr = addrs[mark][l].dtr;
-								F[k].addrs[0].slot = k;
-								F[k].naddrs = 1;
-								break;
-							}
-						if(l<naddrs[mark])break;
-					}
-			}
-			else
-			{
-				int	mark = (int)(long)T;
-				assert(mark > 0 && mark < marker);
-				F[k].base = qc_type_n(qbase, k);
-				F[k].addrs = malloc(sizeof(struct qcaddr)*naddrs[mark]);
-				for(l=0;l<naddrs[mark];l++)
-					if(addrs[mark][l].dtr != except && addrs[mark][l].dtr != -1)
-						F[k].addrs[F[k].naddrs++] = addrs[mark][l];
-			}
-		}
-		return F;
-	}
-
-	r->mother = extract_formula(mqc, mqc_base, -1);
+	r->mother = extract_formula(naddrs, addrs, mqc, mqc_base, -1);
 	r->daughters = malloc(sizeof(struct qcformula*) * R->ndaughters);
 	for(i=0;i<R->ndaughters;i++)
-		r->daughters[i] = extract_formula(dqc[i], dqc_base[i], i);
+		r->daughters[i] = extract_formula(naddrs, addrs, dqc[i], dqc_base[i], i);
 
 	return r;
 }

@@ -2,7 +2,9 @@ CFLAGS=-O3 -g -fPIC
 #CFLAGS=-g
 OBJS = train.o words.o tags.o hmm.o
 
+ifeq ($(shell uname -s),Darwin)
 include ../MacOSX.config
+endif
 
 # compilation flags:
 

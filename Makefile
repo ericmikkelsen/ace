@@ -28,7 +28,9 @@ CFLAGS=-g -O6 -fno-omit-frame-pointer -funsigned-char -falign-loops=32 -funroll-
 
 EXPORT_DYNAMIC_CFLAG=-Wl,--export-dynamic
 
-#include MacOSX.config
+ifeq ($(shell uname -s),Darwin)
+include MacOSX.config
+endif
 
 CFLAGS+=${DELPHIN_CFLAGS} ${POST_CFLAGS} ${REPP_CFLAGS}
 
