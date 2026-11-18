@@ -335,12 +335,18 @@ int	lexical_lookup(struct lattice	*tc, void	(*edge_handler)(struct edge	*e, stru
 #ifdef	USE_GENERICS
 		int k;
 		//printf("TRYING GENERICS ON TOKEN:\n");print_dg(t->dg);printf("\n");
+		// whether each generic entry accepts this token doesn't depend on the
+		// orthographic variant, so test it once per token rather than once per variant
+		char	gle_ok[ngeneric_les?ngeneric_les:1];
+		if(oc->nedges)
+			for(j=0;j<ngeneric_les;j++)
+				gle_ok[j] = (test_first_token_in_lex_dg(generic_les[j]->dg, t) == 0);
 		for(k=0;k<oc->nedges;k++)
 		{
 			struct ochart_edge	*carg_e = oc->edges[k];
 			for(j=0;j<ngeneric_les;j++)
 			{
-				if(test_first_token_in_lex_dg(generic_les[j]->dg, t) != 0)
+				if(!gle_ok[j])
 				{
 					//fprintf(stderr, "TEST rejected generic '%s'\n", generic_les[j]->word);
 					continue;
