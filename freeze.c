@@ -474,7 +474,7 @@ static int	load_freeze()
 
 #ifdef	__EMSCRIPTEN__
 	G = wasm_freezer_region(loaded_freeze_size);
-	if(wasm_read_all(loaded_freeze_fd, G, loaded_freeze_size))exit(-1);
+	if(loaded_freeze_fd != -2 && wasm_read_all(loaded_freeze_fd, G, loaded_freeze_size))exit(-1);
 #else
 	G = (struct grammar*)mmap((void*)FREEZER_MMAP_BASE, loaded_freeze_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, loaded_freeze_fd, 0);
 #endif
@@ -586,6 +586,11 @@ void	reload_frozen_grammar()
 		exit(-1);
 	}
 	fprintf(stderr, "NOTE: generation reset\n");
+#ifdef	__EMSCRIPTEN__
+	// an in-memory image has been written to, so it can't be reloaded in place;
+	// exit with 77 and let the host restart with a fresh copy
+	if(loaded_freeze_fd == -2) { fprintf(stderr, "NOTE: image reload needed\n"); exit(77); }
+#endif
 #ifndef	__EMSCRIPTEN__
 	munmap((void*)FREEZER_MMAP_BASE, loaded_freeze_size);
 #endif
@@ -596,6 +601,15 @@ void	reload_frozen_grammar()
 // load flat blocks grammar file
 int	load_frozen_grammar(char	*path)
 {
+#ifdef	__EMSCRIPTEN__
+	extern long	wasm_memory_image_bytes;
+	if(!strcmp(path, "@memory"))
+	{
+		loaded_freeze_fd = -2;	// image already in the region (see ace_web_reserve)
+		loaded_freeze_size = wasm_memory_image_bytes;
+		return load_freeze();
+	}
+#endif
 	int	freeze_fd = open(path, O_RDONLY);
 	int	len;
 

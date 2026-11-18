@@ -3,8 +3,9 @@
 #
 #   wasm/build.sh <deps dir> <grammar config.tdl> <out dir>
 #
-# <deps dir> comes from wasm/build-deps.sh. Produces <out dir>/ace (JS loader),
-# <out dir>/ace.wasm and <out dir>/grammar.dat. Run with: node <out dir>/ace -g <out dir>/grammar.dat
+# <deps dir> comes from wasm/build-deps.sh. Produces <out dir>/ace + ace.wasm (Node CLI),
+# <out dir>/ace-web.js + ace-web.wasm (browser module) and <out dir>/grammar.dat.
+# Node: node <out dir>/ace -g <out dir>/grammar.dat    Browser: wasm/web/build-site.sh
 #
 # Two stages, because the grammar's quickcheck extractor is C generated from the
 # grammar (natively it's compiled to a shared library and dlopen'd at parse time):
@@ -25,6 +26,7 @@ emcc -O3 -c "$OUT/qcex.c" -o "$OUT/qcex.o"
 rm -f ace ace.wasm
 make ace WASM=1 DEPS="$DEPS" QC_C="$OUT/qcex.c" > "$OUT/build-stage2.log" 2>&1
 if grep -q "signature mismatch" "$OUT/build-stage2.log"; then echo "wasm-ld reported signature mismatches; see $OUT/build-stage2.log" >&2; exit 1; fi
-cp ace ace.wasm "$OUT/"
+make ace-web.js WASM=1 DEPS="$DEPS" QC_C="$OUT/qcex.c" >> "$OUT/build-stage2.log" 2>&1
+cp ace ace.wasm ace-web.js ace-web.wasm "$OUT/"
 (cd "$(dirname "$CONFIG")" && node "$OUT/ace" -G "$OUT/grammar.dat" -g "$(basename "$CONFIG")" > "$OUT/compile.log" 2>&1)
 ls -la "$OUT/ace" "$OUT/ace.wasm" "$OUT/grammar.dat"

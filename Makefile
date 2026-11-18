@@ -45,6 +45,10 @@ APPOBJ=${OBJ} main.o post/post.o timer.o linenoise.o lui-cli.o
 all: ace libace.so libace.a
 
 LINKCC?=${CC}
+# browser build (make WASM=1 ... ace-web.js); see WASM.config
+ace-web.js: ${APPOBJ}
+	${LINKCC} ${WEB_LDFLAGS} ${CFLAGS} ${APPOBJ} -o ace-web.js ${POST_LIBS} ${REPP_LIBS} -lm ${BOOST_REGEX_LIBS}
+
 ace: ${APPOBJ}
 	${LINKCC} ${LDFLAGS} ${EXPORT_DYNAMIC_CFLAG} ${CFLAGS} ${APPOBJ} -o ace ${POST_LIBS} ${REPP_LIBS} ${DELPHIN_LIBS} -lpthread -lm ${BOOST_REGEX_LIBS} -ldl
 

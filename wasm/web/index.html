@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERG in the Browser</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1c1a; --muted: #6b675f; --line: #e3dfd6; --card: #ffffff;
+    --accent: #2f5d8a; --ok: #2e7d4f; --warn: #a15c00; --bad: #a33a3a; --code: #f3f1ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161614; --fg: #ebe8e1; --muted: #a09b90; --line: #2f2e2a; --card: #1f1e1b;
+      --accent: #8fb4dd; --ok: #7fc79c; --warn: #e0a95a; --bad: #e08a8a; --code: #262521;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161614; --fg: #ebe8e1; --muted: #a09b90; --line: #2f2e2a; --card: #1f1e1b;
+    --accent: #8fb4dd; --ok: #7fc79c; --warn: #e0a95a; --bad: #e08a8a; --code: #262521;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; padding: 12px 14px;
+            border: 1px solid var(--line); border-radius: 10px; background: var(--card); margin-bottom: 16px; }
+  .status b { font-variant-numeric: tabular-nums; }
+  progress { width: 220px; height: 8px; accent-color: var(--accent); }
+  textarea { width: 100%; min-height: 120px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+             background: var(--card); color: var(--fg); font: inherit; resize: vertical; }
+  .row { display: flex; gap: 12px; align-items: center; margin: 10px 0 24px; flex-wrap: wrap; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--accent);
+           background: var(--accent); color: var(--bg); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .result { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px 14px; margin-bottom: 12px; }
+  .result h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; overflow-wrap: anywhere; }
+  .meta { font-size: 13px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  pre { background: var(--code); border-radius: 8px; padding: 10px 12px; margin: 10px 0 0; overflow-x: auto;
+        font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>English Resource Grammar, in the browser</h1>
+  <p class="sub">The DELPH-IN parser (the Answer Constraint Engine) compiled to WebAssembly, running in a Web Worker. Nothing is sent to a server; every sentence is parsed on this device.</p>
+
+  <div class="status" id="status">
+    <span id="state">Starting…</span>
+    <progress id="bar" max="1" value="0"></progress>
+    <span class="hint" id="stats"></span>
+  </div>
+
+  <textarea id="input" spellcheck="false">The dog barked.
+Browne's dog couldn't bark.
+Abrams barked at 3D printers in 2001 A Space Odyssey.
+I must call the dentist before Friday.
+Kim saw the man with the telescope.</textarea>
+  <div class="row">
+    <button id="go" disabled>Parse</button>
+    <span class="hint">One sentence per line. Up to 5 readings each; parses that need more than 128 MB are reported as too big.</span>
+  </div>
+
+  <div id="results"></div>
+</main>
+<script>
+const ARGS = "-n 5 --max-chart-megabytes=128 --max-unpack-megabytes=128";
+const $ = (id) => document.getElementById(id);
+let worker, nextId = 1;
+
+// MRS on one line is hard to read; put each relation on its own line
+function prettyMrs(m) {
+  return m.replace(/ RELS: < /, "\n RELS: <\n   ")
+          .replace(/ \]  \[ /g, " ]\n   [ ")
+          .replace(/ > HCONS: < /, " >\n HCONS: < ")
+          .replace(/ > ICONS: < /, " >\n ICONS: < ");
+}
+
+function startWorker() {
+  worker = new Worker("worker.js");
+  $("go").disabled = true;
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "progress") {
+      $("state").textContent = "Downloading grammar…";
+      $("bar").value = m.loaded / m.total;
+      $("stats").textContent = `${(m.loaded / 1e6).toFixed(0)} of ${(m.total / 1e6).toFixed(0)} MB unpacked`;
+    } else if (m.type === "ready") {
+      $("state").innerHTML = `<span class="ok">Ready</span>`;
+      $("bar").hidden = true;
+      $("stats").innerHTML = `loaded in <b>${(m.ms / 1000).toFixed(1)} s</b> · grammar <b>${(m.bytes / 1e6).toFixed(0)} MB</b> · memory <b>${m.memoryMB} MB</b>`;
+      $("go").disabled = false;
+    } else if (m.type === "result") {
+      showResult(m);
+      $("stats").innerHTML = $("stats").innerHTML.replace(/memory <b>\d+ MB<\/b>/, `memory <b>${m.memoryMB} MB</b>`);
+    } else if (m.type === "done") {
+      $("go").disabled = false;
+    } else if (m.type === "restart") {
+      $("state").textContent = "Reloading grammar…";
+      worker.terminate(); startWorker();
+    } else if (m.type === "error") {
+      $("state").innerHTML = `<span class="bad">Error: ${m.message}</span>`;
+    }
+  };
+  worker.postMessage({ type: "init", args: ARGS });
+}
+
+function showResult(m) {
+  const div = document.createElement("div");
+  div.className = "result";
+  const n = m.readings.length;
+  const verdict = n ? `<span class="ok">${n} reading${n > 1 ? "s" : ""}${n === 5 ? " (first 5)" : ""}</span>`
+              : m.capped ? `<span class="warn">too big for the 128 MB browser cap</span>`
+              : `<span class="bad">no parse</span>`;
+  div.innerHTML = `<h3></h3><div class="meta">${verdict}<span>${m.ms} ms</span></div>`;
+  div.querySelector("h3").textContent = m.sentence;
+  m.readings.forEach((r, i) => {
+    const pre = document.createElement("pre");
+    pre.textContent = prettyMrs(r.mrs);
+    if (i === 0) div.appendChild(pre);
+    else {
+      const d = document.createElement("details");
+      d.innerHTML = `<summary>Reading ${i + 1}</summary>`;
+      d.appendChild(pre); div.appendChild(d);
+    }
+  });
+  $("results").appendChild(div);
+}
+
+$("go").onclick = () => {
+  $("results").innerHTML = "";
+  $("go").disabled = true;
+  worker.postMessage({ type: "parse", id: nextId++, text: $("input").value });
+};
+startWorker();
+</script>
+</body>
+</html>

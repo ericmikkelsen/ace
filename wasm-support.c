@@ -74,3 +74,56 @@ __attribute__((weak)) void	extractor(struct type **entries, struct dg *d)
 	exit(-1);
 }
 #endif
+
+/* ---- Browser entry points (used by wasm/web/worker.js) ----
+ *
+ *   base = ace_web_reserve(bytes)   reserve the image region; JS streams the image into it
+ *   ace_web_init(bytes, "args")      parse engine arguments and set up from the in-memory image
+ *   n = ace_web_parse("sentence")    parse one line; output goes to stdout (Module.print)
+ */
+#ifdef __EMSCRIPTEN__
+#include	<emscripten.h>
+#include	<string.h>
+#include	<locale.h>
+
+extern void	parse_args(int argc, char *argv[]);
+extern void	initialize_engine();
+extern int	parse_line(char *line);
+extern void	clear_slab();
+extern char	*load_grammar_path;
+long	wasm_memory_image_bytes = 0;
+
+EMSCRIPTEN_KEEPALIVE void	*ace_web_reserve(unsigned int bytes)
+{
+	return wasm_freezer_region(bytes);
+}
+
+EMSCRIPTEN_KEEPALIVE int	ace_web_init(unsigned int image_bytes, char *args)
+{
+	static char	*argv[64];
+	int	argc = 0;
+	setlocale(LC_ALL, "C.UTF-8");	// grammars are UTF-8; see the locale note in the build docs
+	setlocale(LC_NUMERIC, "POSIX");
+	argv[argc++] = "ace";
+	char	*copy = strdup(args ? args : ""), *tok;
+	for(tok = strtok(copy, " "); tok && argc < 60; tok = strtok(NULL, " "))argv[argc++] = tok;
+	argv[argc++] = "-g";
+	argv[argc++] = "@memory";
+	argv[argc] = NULL;
+	wasm_memory_image_bytes = image_bytes;
+	parse_args(argc, argv);
+	initialize_engine();
+	return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int	ace_web_parse(char *line)
+{
+	char	*copy = strdup(line);
+	clear_slab();
+	int	n = parse_line(copy);
+	free(copy);
+	fflush(stdout);
+	fflush(stderr);
+	return n;
+}
+#endif
