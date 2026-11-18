@@ -73,14 +73,7 @@ const ARGS = "-n 5 --max-chart-megabytes=128 --max-unpack-megabytes=128";
 const $ = (id) => document.getElementById(id);
 let worker, nextId = 1;
 
-// MRS on one line is hard to read; put each relation on its own line
-function prettyMrs(m) {
-  return m.replace(/ RELS: < /, "\n RELS: <\n   ")
-          .replace(/ \]  \[ /g, " ]\n   [ ")
-          .replace(/ > HCONS: < /, " >\n HCONS: < ")
-          .replace(/ > ICONS: < /, " >\n ICONS: < ");
-}
-
+// All parsing and formatting happens in worker.js; this thread only updates the page.
 function startWorker() {
   worker = new Worker("worker.js");
   $("go").disabled = true;
@@ -93,11 +86,11 @@ function startWorker() {
     } else if (m.type === "ready") {
       $("state").innerHTML = `<span class="ok">Ready</span>`;
       $("bar").hidden = true;
-      $("stats").innerHTML = `loaded in <b>${(m.ms / 1000).toFixed(1)} s</b> · grammar <b>${(m.bytes / 1e6).toFixed(0)} MB</b> · memory <b>${m.memoryMB} MB</b>`;
+      $("stats").innerHTML = `loaded in <b>${(m.ms / 1000).toFixed(1)} s</b> · grammar <b>${(m.bytes / 1e6).toFixed(0)} MB</b> · memory <b id="mem">${m.memoryMB} MB</b>`;
       $("go").disabled = false;
     } else if (m.type === "result") {
       showResult(m);
-      $("stats").innerHTML = $("stats").innerHTML.replace(/memory <b>\d+ MB<\/b>/, `memory <b>${m.memoryMB} MB</b>`);
+      $("mem").textContent = `${m.memoryMB} MB`;
     } else if (m.type === "done") {
       $("go").disabled = false;
     } else if (m.type === "restart") {
@@ -121,7 +114,7 @@ function showResult(m) {
   div.querySelector("h3").textContent = m.sentence;
   m.readings.forEach((r, i) => {
     const pre = document.createElement("pre");
-    pre.textContent = prettyMrs(r.mrs);
+    pre.textContent = r.pretty;
     if (i === 0) div.appendChild(pre);
     else {
       const d = document.createElement("details");
